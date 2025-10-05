@@ -13,7 +13,6 @@ const START_URL =
 const SHOTS_DIR = path.resolve('screens');
 fs.mkdirSync(SHOTS_DIR, { recursive: true });
 
-// Your Bright Data proxies (we’ll add sticky session & CA exit to usernames)
 type ProxyAuth = { server: string; username: string; password: string };
 const BASE_PROXIES: ProxyAuth[] = [
   { server: 'http://brd.superproxy.io:33335', username: 'brd-customer-hl_89e14601-zone-residential_proxy1', password: 'iplu2iawmm2z' },
@@ -24,7 +23,7 @@ const BASE_PROXIES: ProxyAuth[] = [
 function stickyUser(u: string): string {
   const sess = `session-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
   let out = u.includes('-session-') ? u : `${u}-${sess}`;
-  if (!/-country-/.test(out)) out = `${out}-country-ca`; // CA exit tends to help for Indeed CA
+  if (!/-country-/.test(out)) out = `${out}-country-ca`; 
   return out;
 }
 function pickProxy(i: number): ProxyAuth {
@@ -52,7 +51,6 @@ async function isGate(page: Page): Promise<boolean> {
 }
 
 async function injectCookies(context: BrowserContext): Promise<void> {
-  // Optional: CF cookies from a manual solve: CF_COOKIES='cf_clearance=...; __cf_bm=...'
   const raw = process.env.CF_COOKIES?.trim();
   if (!raw) return;
   const cookies = raw

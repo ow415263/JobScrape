@@ -62,7 +62,6 @@ test('LinkedIn list → JSON (link-first, list-pane scroll, screenshots, dedupe,
       all.push(item);
     }
 
-    // try simple "Next" pagination; stop if it's not visible
     const next = page.locator('button.jobs-search-pagination__indicator[aria-label*="next" i]').first();
     if (!(await next.isVisible().catch(() => false))) break;
     await next.click({ noWaitAfter: true }).catch(() => {});
@@ -75,7 +74,6 @@ test('LinkedIn list → JSON (link-first, list-pane scroll, screenshots, dedupe,
   console.log(`✅ ${all.length} unique jobs → ${OUT_PATH}`);
 });
 
-/* ---------------- helpers (compact) ---------------- */
 
 async function dismissOverlays(page: Page) {
   await page.keyboard.press('Escape').catch(() => {});
@@ -90,8 +88,6 @@ async function dismissOverlays(page: Page) {
   }
 }
 
-// Scroll the results *pane* (nearest scrollable ancestor of the <ul>), with window fallback,
-// until the number of job links stops increasing for a few cycles.
 async function fillListByScrolling(page: Page, linkSel: string, maxRounds = 24) {
   const list = await page.$('ul.jobs-search__results-list, ul.scaffold-layout__list-container');
   let prev = 0, still = 0;
@@ -99,7 +95,6 @@ async function fillListByScrolling(page: Page, linkSel: string, maxRounds = 24) 
   for (let i = 0; i < maxRounds; i++) {
     await page.evaluate((ul) => {
       const list = ul as Element | null;
-      // find a scrollable ancestor; else fallback to document.scrollingElement
       let pane: Element | null = list?.parentElement || null;
       const scrollable = (e: Element) => {
         const s = getComputedStyle(e as HTMLElement);

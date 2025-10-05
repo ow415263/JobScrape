@@ -1,4 +1,3 @@
-// tests/google.spec.ts
 import { test, expect, Page } from '@playwright/test';
 import { chromium } from 'playwright-extra';
 import StealthPlugin from 'puppeteer-extra-plugin-stealth';
@@ -13,7 +12,6 @@ const TARGET_URL =
 const SHOTS_DIR = path.resolve('screens');
 fs.mkdirSync(SHOTS_DIR, { recursive: true });
 
-// Bright Data SERP/Web Unlocker creds
 const SERP_USER = 'brd-customer-hl_89e14601-zone-serp_api1';
 const SERP_PASS = '5mu2hmgs3yc1';
 const COUNTRY = 'ca';
@@ -27,7 +25,6 @@ function serpProxy() {
   };
 }
 
-// ---------- helpers ----------
 async function acceptConsent(page: Page) {
   for (const f of page.frames()) {
     const btn = f.locator('button#L2AGLb, #W0wltc, button:has-text("I agree"), button:has-text("Accept all")').first();
@@ -74,7 +71,6 @@ async function gotoWithRetry(page: Page, url: string, tries = 3) {
   throw lastErr ?? new Error('Navigation failed');
 }
 
-/** Scrolls until height stabilizes; clicks “More results/Next” if present. */
 async function loadAllResults(page: Page, maxLoops = 20) {
   let lastH = 0;
   for (let i = 0; i < maxLoops; i++) {
