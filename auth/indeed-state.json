@@ -1,0 +1,47 @@
+{
+  "cookies": [
+    {
+      "name": "__cf_bm",
+      "value": "H9gAw2DpGNPyE.qaI8e82wyvE9meglzoIQJcV1ATXnk-1759620843-1.0.1.1-QE7FbHMSyRgMjUfBfVPqqmzk2U1BiEwEhV4RM4YwuzzY_89D18Yc1RaFUjXRgwEgUHqJCqnk2HehL5Mx_1_kdTFi3zMUYlTeExhRqhf.iMQ",
+      "domain": ".indeed.com",
+      "path": "/",
+      "expires": 1759622643.369692,
+      "httpOnly": true,
+      "secure": true,
+      "sameSite": "None"
+    },
+    {
+      "name": "cf_chl_rc_ni",
+      "value": "1",
+      "domain": "ca.indeed.com",
+      "path": "/",
+      "expires": 1759624501,
+      "httpOnly": false,
+      "secure": true,
+      "sameSite": "None",
+      "partitionKey": "https://indeed.com",
+      "_crHasCrossSiteAncestor": false
+    },
+    {
+      "name": "__cf_bm",
+      "value": ".w6BQABH0q1yxBsmkLCoGcIqd1Si0K0bpu3zITrMOsA-1759620903-1.0.1.1-JndtaLoRjQiYa3NtTXbHg8T2aZNJ6a92V00.jBec_NJ_480DD8sOx7suVVwq2m0vR5zyvQS0Va_4uepEoosLpYV_lqo00Xz.2o4Tph4LiXc",
+      "domain": ".t.indeed.com",
+      "path": "/",
+      "expires": 1759622703.808065,
+      "httpOnly": true,
+      "secure": true,
+      "sameSite": "None"
+    }
+  ],
+  "origins": [
+    {
+      "origin": "https://challenges.cloudflare.com",
+      "localStorage": [
+        {
+          "name": "cf.turnstile.u",
+          "value": "IpeLfD2m2KebOO7qxnWN8OqF85RbSFpGbI0stSxMoJM-1759620844-1.3.1.1-N7eb92yuEC16HsaYV8.2vFGhFXx3gtYxcOTJA1f8ZUl8TVkGF8.OJjJ2j3AI5LZ.yek5hntIfA_d6Smk2dwx3w"
+        }
+      ]
+    }
+  ]
+}
