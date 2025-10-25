@@ -16,6 +16,7 @@
     "random-useragent": "^0.5.0"
   },
   "dependencies": {
+    "patchright": "^1.56.1",
     "playwright": "^1.55.1"
   }
 }

@@ -1,31 +1,38 @@
-import { test, expect, Page } from '@playwright/test';
-import { chromium } from 'playwright-extra';
-import StealthPlugin from 'puppeteer-extra-plugin-stealth';
+import { test } from '@playwright/test';
+import { chromium, Page } from 'patchright';
 import fs from 'fs';
 import path from 'path';
 
-chromium.use(StealthPlugin());
+const SEARCH_QUERY = process.env.GOOGLE_QUERY?.trim() || 'ece jobs';
 
 const TARGET_URL =
-  'https://www.google.com/search?q=ece%20jobs&jbr=sep:0&udm=8&ved=2ahUKEwjrivbTjv2PAxXK1fACHZ80KKAQ3L8LegQIKBAM';
+  process.env.GOOGLE_JOBS_URL?.trim() ||
+  `https://www.google.com/search?q=${encodeURIComponent(SEARCH_QUERY)}&jbr=sep:0&udm=8&ved=2ahUKEwjrivbTjv2PAxXK1fACHZ80KKAQ3L8LegQIKBAM`;
 
 const SHOTS_DIR = path.resolve('screens');
 fs.mkdirSync(SHOTS_DIR, { recursive: true });
 
-const SERP_USER = 'brd-customer-hl_89e14601-zone-serp_api1';
-const SERP_PASS = '5mu2hmgs3yc1';
-const COUNTRY = 'ca';
+const OUT_PATH = path.resolve('data', 'google.json');
+const DUMP_PATH = path.resolve('data', 'google-dump.html');
 
-function serpProxy() {
-  const session = `session-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
-  return {
-    server: 'http://brd.superproxy.io:22225',
-    username: `${SERP_USER}-${session}-country-${COUNTRY}`,
-    password: SERP_PASS,
-  };
-}
+const SERP_PROXY_SERVER =
+  process.env.SERP_PROXY_SERVER || 'http://brd.superproxy.io:33335';
+const SERP_PROXY_USERNAME =
+  process.env.SERP_PROXY_USERNAME || 'brd-customer-hl_89e14601-zone-serp_api1';
+const SERP_PROXY_PASSWORD =
+  process.env.SERP_PROXY_PASSWORD || '5mu2hmgs3yc1';
 
-async function acceptConsent(page: Page) {
+type Job = {
+  title: string;
+  employer: string;
+  location?: string;
+  date?: string;
+  salary?: string;
+  url: string;
+};
+
+// ---- helpers ----
+async function acceptConsent(page: Page): Promise<void> {
   for (const f of page.frames()) {
     const btn = f.locator('button#L2AGLb, #W0wltc, button:has-text("I agree"), button:has-text("Accept all")').first();
     if (await btn.isVisible().catch(() => false)) {
@@ -39,25 +46,21 @@ async function acceptConsent(page: Page) {
 }
 
 async function looksLikeGate(page: Page) {
-  const texts = [/unusual traffic/i, /verify you'?re? a human/i, /before you continue/i, /detected unusual/i];
-  for (const t of texts) {
-    if (await page.getByText(t).first().isVisible().catch(() => false)) return true;
-  }
-  const recaptcha = await page
-    .locator('iframe[title*="challenge"], iframe[title*="captcha"], iframe[src*="recaptcha"]')
-    .count();
-  const results = await page.locator('#search, #rcnt').count();
-  return recaptcha > 0 && results === 0;
+  return !!(await page
+    .locator('iframe[title*="challenge"], iframe[src*="recaptcha"], text=/unusual traffic|are you a robot|detected unusual/i')
+    .first()
+    .isVisible()
+    .catch(() => false));
 }
 
 async function humanize(page: Page) {
   await page.mouse.move(200 + Math.random() * 300, 220 + Math.random() * 220, { steps: 12 });
-  await page.waitForTimeout(350 + Math.round(Math.random() * 450));
-  await page.mouse.wheel(0, 300 + Math.round(Math.random() * 400));
-  await page.waitForTimeout(350 + Math.round(Math.random() * 450));
+  await page.waitForTimeout(800 + Math.random() * 600);
+  await page.mouse.wheel(0, 400 + Math.random() * 200);
+  await page.waitForTimeout(800 + Math.random() * 600);
 }
 
-async function gotoWithRetry(page: Page, url: string, tries = 3) {
+async function gotoWithRetry(page: Page, url: string, tries = 3): Promise<void> {
   let lastErr: unknown;
   for (let i = 0; i < tries; i++) {
     try {
@@ -71,7 +74,7 @@ async function gotoWithRetry(page: Page, url: string, tries = 3) {
   throw lastErr ?? new Error('Navigation failed');
 }
 
-async function loadAllResults(page: Page, maxLoops = 20) {
+async function loadAllResults(page: Page, maxLoops = 20): Promise<void> {
   let lastH = 0;
   for (let i = 0; i < maxLoops; i++) {
     const more = page.locator('text=More results, #pnnext').first();
@@ -87,56 +90,139 @@ async function loadAllResults(page: Page, maxLoops = 20) {
   }
 }
 
-// chromium-only
+function canonicalizeUrl(input: string): string {
+  if (!input) return '';
+  try {
+    const url = new URL(input);
+    if (url.hostname.endsWith('google.com')) {
+      const inner = url.searchParams.get('url') || url.searchParams.get('q');
+      if (inner) {
+        return canonicalizeUrl(decodeURIComponent(inner));
+      }
+    }
+    url.hash = '';
+    return url.toString();
+  } catch {
+    return input;
+  }
+}
+
+async function isResultsReady(page: Page): Promise<boolean> {
+  return (await page
+    .locator('div[jscontroller="Q7Rsec"], div.BjJfJf, div.g a[href^="https://www.google.com/url"]')
+    .first()
+    .isVisible()
+    .catch(() => false)) as boolean;
+}
+
+async function extractJobs(page: Page): Promise<Job[]> {
+  const jobs = await page.evaluate(() => {
+    const norm = (val?: string | null) => (val ? val.replace(/\s+/g, ' ').trim() : '');
+    const items: Job[] = [];
+    document.querySelectorAll('div.BjJfJf, div[jscontroller="Q7Rsec"]').forEach(card => {
+      const anchor = card.querySelector<HTMLAnchorElement>('a[href^="https://www.google.com/url"], a[href^="https://www.google.com/aclk"]');
+      const title = norm(card.querySelector('[role="heading"], .pMhGee, .FSrVnb')?.textContent);
+      if (!anchor || !title) return;
+      items.push({
+        title,
+        employer: norm(card.querySelector('.vNEEBe, .Qk80Jf')?.textContent) || '',
+        location: norm(card.querySelector('.Q8LRLc, .r0Qyq')?.textContent) || undefined,
+        date: norm(card.querySelector('.wwUB2c, time')?.textContent) || undefined,
+        salary: norm(card.querySelector('.LL4CDc, .P2Tf5c, .gv4No, .jlKIjf')?.textContent) || undefined,
+        url: anchor.href,
+      });
+    });
+    return items;
+  });
+  return jobs.filter(j => j.title && j.url);
+}
+
+function deduplicateJobs(jobs: Job[]): Job[] {
+  const seen = new Set<string>();
+  return jobs.filter(job => {
+    const canonical = canonicalizeUrl(job.url);
+    if (!canonical) return false;
+    if (seen.has(canonical)) return false;
+    seen.add(canonical);
+    return true;
+  });
+}
+
 test.skip(({ browserName }) => browserName !== 'chromium', 'Chromium-only test');
 
-test('Google → full-page before/after screenshots (Chromium only)', async () => {
+test('Google → bypass gates, capture screenshots, extract jobs', async () => {
   test.setTimeout(240_000);
 
-  const proxy = serpProxy();
-  const browser = await chromium.launch({ headless: true, proxy });
+  const MAX_ATTEMPTS = 3;
+  let lastErr: unknown;
 
-  const context = await browser.newContext({
-    ignoreHTTPSErrors: true,
-    userAgent:
-      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    locale: 'en-CA',
-    timezoneId: 'America/Toronto',
-    viewport: { width: 1290, height: 900 },
-    extraHTTPHeaders: { 'accept-language': 'en-CA,en;q=0.9' },
-  });
+  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+    const context = await chromium.launchPersistentContext('/tmp/patchright_google', {
+      channel: 'chrome',
+      headless: false,
+      viewport: null,
+      ignoreHTTPSErrors: true,
+      args: ['--headless=new'],
+      proxy: {
+        server: SERP_PROXY_SERVER,
+        username: SERP_PROXY_USERNAME,
+        password: SERP_PROXY_PASSWORD,
+      },
+    });
 
-  const page = await context.newPage();
+    const page = context.pages()[0] || (await context.newPage());
 
-  try {
-    // BEFORE (full page as-is)
-    await gotoWithRetry(page, TARGET_URL, 3);
-    await page.screenshot({ path: path.join(SHOTS_DIR, 'google-before.png'), fullPage: true }).catch(() => {});
-
-    // Consent + light gate handling
-    await acceptConsent(page);
-    for (let i = 0; i < 4; i++) {
-      if (!(await looksLikeGate(page))) break;
-      await humanize(page);
-      await page.waitForTimeout(900 + Math.round(Math.random() * 800));
-      await page.reload({ waitUntil: 'domcontentloaded' }).catch(() => {});
-    }
-
-    // Confirm results container exists
     try {
-      await expect(page.locator('#search')).toBeVisible({ timeout: 15_000 });
-    } catch {
-      await expect(page.locator('#rcnt')).toBeVisible({ timeout: 15_000 });
+      await gotoWithRetry(page, TARGET_URL, 3);
+      await page.screenshot({ path: path.join(SHOTS_DIR, 'google-before.png'), fullPage: true }).catch(() => {});
+      await acceptConsent(page);
+
+      for (let i = 0; i < 5; i++) {
+        if (!(await looksLikeGate(page))) break;
+        await humanize(page);
+        await page.waitForTimeout(1_200 + Math.round(Math.random() * 800));
+        await page.reload({ waitUntil: 'domcontentloaded' }).catch(() => {});
+        await acceptConsent(page);
+      }
+
+      const start = Date.now();
+      let ready = false;
+      while (Date.now() - start < 15_000) {
+        if (await isResultsReady(page)) {
+          ready = true;
+          break;
+        }
+        await page.waitForTimeout(600);
+      }
+      if (!ready) throw new Error('Results not ready in allotted time');
+
+      await loadAllResults(page);
+
+      await fs.promises.mkdir(path.dirname(OUT_PATH), { recursive: true }).catch(() => {});
+      await fs.promises.writeFile(DUMP_PATH, await page.content(), 'utf8').catch(() => {});
+
+      const jobs = await extractJobs(page);
+      const unique = deduplicateJobs(jobs).map(job => ({
+        ...job,
+        url: canonicalizeUrl(job.url),
+      }));
+
+      await fs.promises.writeFile(OUT_PATH, JSON.stringify(unique, null, 2), 'utf8');
+
+      await page.screenshot({ path: path.join(SHOTS_DIR, 'google-after.png'), fullPage: true }).catch(() => {});
+
+      console.log(`✅ Google Jobs: captured ${unique.length} unique listings → ${OUT_PATH}`);
+      await context.close();
+      return;
+    } catch (error) {
+      lastErr = error;
+      await page
+        .screenshot({ path: path.join(SHOTS_DIR, `google-failure-attempt-${attempt + 1}.png`), fullPage: true })
+        .catch(() => {});
+      console.warn(`Attempt ${attempt + 1} failed: ${String(error)}. Retrying…`);
+      await context.close().catch(() => {});
     }
-
-    // Load the whole results list (so fullPage truly captures the bottom)
-    await loadAllResults(page);
-
-    // AFTER (true full-page)
-    await page.screenshot({ path: path.join(SHOTS_DIR, 'google-after.png'), fullPage: true });
-
-    console.log(`✅ Google full-page screenshots captured via SERP username: ${proxy.username}`);
-  } finally {
-    await browser.close().catch(() => {});
   }
+
+  throw lastErr ?? new Error('Still gated on Google after attempts.');
 });

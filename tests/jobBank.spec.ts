@@ -1,41 +1,27 @@
-// tests/jobbank.spec.ts
-import { test, expect, Page, BrowserContext } from '@playwright/test';
-import { chromium } from 'playwright-extra';
-import StealthPlugin from 'puppeteer-extra-plugin-stealth';
+import { test } from '@playwright/test';
+import { chromium, Page } from 'patchright';
 import fs from 'fs';
 import path from 'path';
 
-chromium.use(StealthPlugin());
-
-// Target page (results list)
 const TARGET_URL =
   'https://www.jobbank.gc.ca/jobsearch/jobsearch?fn21=42202&page=1&sort=M&fprov=ON';
 
 const SHOTS_DIR = path.resolve('screens');
 fs.mkdirSync(SHOTS_DIR, { recursive: true });
 
-// --- Your Bright Data residential proxies (same as Indeed) ---
-type ProxyAuth = { server: string; username: string; password: string };
-const BASE_PROXIES: ProxyAuth[] = [
-  { server: 'http://brd.superproxy.io:33335', username: 'brd-customer-hl_89e14601-zone-residential_proxy1', password: 'iplu2iawmm2z' },
-  { server: 'http://brd.superproxy.io:33335', username: 'brd-customer-hl_89e14601-zone-residential_proxy2', password: 'wekc39rm8od1' },
-  { server: 'http://brd.superproxy.io:33335', username: 'brd-customer-hl_89e14601-zone-residential_proxy3', password: '5iymfyjztb7u' },
-];
+const OUT_PATH = path.resolve('data', 'bank.json');
 
-function stickyUser(u: string) {
-  const sess = `session-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
-  let out = u.includes('-session-') ? u : `${u}-${sess}`;
-  if (!/-country-/.test(out)) out = `${out}-country-ca`; // CA exit helps here
-  return out;
-}
-function pickProxy(i: number): ProxyAuth {
-  const b = BASE_PROXIES[i % BASE_PROXIES.length];
-  return { ...b, username: stickyUser(b.username) };
-}
+type Job = {
+  title: string;
+  employer: string;
+  location?: string;
+  date?: string;
+  salary?: string;
+  url: string;
+};
 
 // ---- helpers ----
 async function acceptConsent(page: Page): Promise<void> {
-  // Generic cookie/consent banners
   const btn = page
     .locator(
       [
@@ -68,7 +54,6 @@ async function looksLikeGate(page: Page): Promise<boolean> {
   const recaptcha = await page
     .locator('iframe[title*="challenge"], iframe[title*="captcha"], iframe[src*="recaptcha"]')
     .count();
-  // If there are no obvious results anchors but a captcha frame is present, call it a gate.
   const hasJobLinks = await page.locator('a[href*="/jobsearch/jobposting/"]').count();
   return recaptcha > 0 && hasJobLinks === 0;
 }
@@ -81,84 +66,170 @@ async function humanize(page: Page): Promise<void> {
 }
 
 async function loadAllResults(page: Page, maxLoops = 12): Promise<void> {
-  let lastH = 0;
   for (let i = 0; i < maxLoops; i++) {
-    const h = await page.evaluate(() => document.body.scrollHeight);
-    await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight)).catch(() => {});
-    await page.waitForTimeout(800 + Math.round(Math.random() * 600));
-    if (h === lastH) break;
-    lastH = h;
+    const button = page.locator('#moreresultbutton').first();
+    if (!(await button.isVisible().catch(() => false))) break;
+
+    const beforeCount = await page.locator('article.action-buttons').count().catch(() => 0);
+    await button.scrollIntoViewIfNeeded().catch(() => {});
+    await page.waitForTimeout(500 + Math.round(Math.random() * 500));
+    await button.click({ timeout: 5000 }).catch(() => {});
+
+    await page.waitForFunction(
+      ({ selector, prev }) => document.querySelectorAll(selector).length > prev,
+      { selector: 'article.action-buttons', prev: beforeCount },
+      { timeout: 10_000 }
+    ).catch(() => {});
+
+    await page.waitForTimeout(1_000 + Math.round(Math.random() * 1_200));
   }
 }
 
 async function isResultsReady(page: Page): Promise<boolean> {
-  // Look for any job posting link
   return (await page.locator('a[href*="/jobsearch/jobposting/"]').first().isVisible().catch(() => false)) === true;
 }
 
-// Chromium only
+async function extractJobs(page: Page): Promise<Job[]> {
+  return page.evaluate(() => {
+    const jobs: Job[] = [];
+
+    // Each result is an article.action-buttons containing anchor + details list
+    const cards = Array.from(document.querySelectorAll('article.action-buttons'));
+
+    const clean = (input?: string | null) => (input ? input.replace(/\s+/g, ' ').trim() : undefined);
+
+    for (const card of cards) {
+      const linkEl = card.querySelector('a.resultJobItem[href]') as HTMLAnchorElement | null;
+      const titleEl = card.querySelector('span.noctitle') as HTMLElement | null;
+      const employerEl = card.querySelector('li.business') as HTMLElement | null;
+      const locationEl = card.querySelector('li.location') as HTMLElement | null;
+      const dateEl = card.querySelector('li.date') as HTMLElement | null;
+      const salaryEl = card.querySelector('li.salary') as HTMLElement | null;
+
+      if (!titleEl || !linkEl) continue;
+
+      const rawHref = linkEl.getAttribute('href') || linkEl.href || '';
+      let url = '';
+      try {
+        const abs = new URL(rawHref, window.location.origin);
+        abs.hash = '';
+        url = abs.toString().replace(/;jsessionid=[^?]+/i, '');
+      } catch (err) {
+        url = rawHref;
+      }
+
+      const locText = locationEl?.textContent ? locationEl.textContent.replace(/Location/i, '') : undefined;
+      const salaryText = salaryEl?.textContent ? salaryEl.textContent.replace(/Salary/i, '') : undefined;
+
+      const job: Job = {
+        title: clean(titleEl.textContent) || '',
+        employer: clean(employerEl?.textContent) || '',
+        location: clean(locText),
+        date: clean(dateEl?.textContent),
+        salary: clean(salaryText),
+        url,
+      };
+
+      if (job.url && job.title) {
+        jobs.push(job);
+      }
+    }
+
+    return jobs;
+  });
+}
+
+function deduplicateJobs(jobs: Job[]): Job[] {
+  const seen = new Set<string>();
+  return jobs.filter(job => {
+    const canonical = canonicalizeUrl(job.url);
+    if (seen.has(canonical)) return false;
+    seen.add(canonical);
+    return true;
+  });
+}
+
+function canonicalizeUrl(input: string): string {
+  try {
+    const url = new URL(input);
+    url.hash = '';
+    url.search = '';
+    url.pathname = url.pathname.replace(/;jsessionid[^/]*?/i, '');
+    return url.toString();
+  } catch {
+    return input.replace(/;jsessionid=[^?]+/i, '').split('#')[0].split('?')[0];
+  }
+}
+
 test.skip(({ browserName }) => browserName !== 'chromium', 'Chromium-only test');
 
-test('JobBank → pass consent/captcha then full-page before/after screenshots (Chromium only)', async () => {
+test('JobBank → bypass gates, capture screenshots, extract jobs', async () => {
   test.setTimeout(240_000);
 
   let lastErr: unknown;
-  const MAX_ATTEMPTS = Math.max(3, BASE_PROXIES.length * 3);
+  const MAX_ATTEMPTS = 3;
 
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
-    const proxy = pickProxy(attempt);
-
-    const browser = await chromium.launch({
-      headless: true,
-      proxy: { server: proxy.server, username: proxy.username, password: proxy.password },
+    const context = await chromium.launchPersistentContext('/tmp/patchright_jobbank', {
+      channel: 'chrome',
+      headless: false,
+      viewport: null,
+      ignoreHTTPSErrors: true,
+      args: ['--headless=new'],
     });
 
-    const context = await browser.newContext({
-      ignoreHTTPSErrors: true, // proxy MITM certs
-      userAgent:
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-      locale: 'en-CA',
-      timezoneId: 'America/Toronto',
-      viewport: { width: 1290, height: 900 },
-      extraHTTPHeaders: { 'accept-language': 'en-CA,en;q=0.9' },
-    });
-
-    const page = await context.newPage();
+    const page = context.pages()[0] || (await context.newPage());
 
     try {
-      // BEFORE (as-is)
       await page.goto(TARGET_URL, { waitUntil: 'domcontentloaded', timeout: 60_000 });
       await page.screenshot({ path: path.join(SHOTS_DIR, 'jobbank-before.png'), fullPage: true }).catch(() => {});
-
-      // Handle consent + light gating
       await acceptConsent(page);
+
       for (let i = 0; i < 5; i++) {
         if (!(await looksLikeGate(page))) break;
         await humanize(page);
-        await page.waitForTimeout(900 + Math.round(Math.random() * 700));
+        await page.waitForTimeout(1_200 + Math.round(Math.random() * 800));
         await page.reload({ waitUntil: 'domcontentloaded' }).catch(() => {});
         await acceptConsent(page);
       }
 
-      // Confirm we’re looking at results (at least one job link)
-      await expect(async () => {
-        if (!(await isResultsReady(page))) throw new Error('results not ready');
-      }).toPass({ timeout: 15_000, intervals: [500, 800, 1000] });
+      const start = Date.now();
+      let ready = false;
+      while (Date.now() - start < 15_000) {
+        if (await isResultsReady(page)) {
+          ready = true;
+          break;
+        }
+        await page.waitForTimeout(600);
+      }
+      if (!ready) throw new Error('Results not ready in allotted time');
 
-      // Scroll to bottom so fullPage grabs everything
       await loadAllResults(page);
 
-      // AFTER
+      // Dump HTML for selector debugging (overwrites each run)
+      const dumpPath = path.resolve('data', 'jobbank-dump.html');
+      await fs.promises.writeFile(dumpPath, await page.content(), 'utf8').catch(() => {});
+
+      const jobs = await extractJobs(page);
+      const unique = deduplicateJobs(jobs);
+          
+          for (const job of unique) {
+            job.url = canonicalizeUrl(job.url);
+          }
+
+      await fs.promises.mkdir(path.dirname(OUT_PATH), { recursive: true });
+      await fs.promises.writeFile(OUT_PATH, JSON.stringify(unique, null, 2), 'utf8');
+
       await page.screenshot({ path: path.join(SHOTS_DIR, 'jobbank-after.png'), fullPage: true });
 
-      console.log(`✅ JobBank ready via proxy username: ${proxy.username}`);
-      await browser.close();
-      return; // success
-    } catch (e) {
-      lastErr = e;
-      await page.screenshot({ path: path.join(SHOTS_DIR, `jobbank-gate-attempt-${attempt + 1}.png`), fullPage: true }).catch(() => {});
-      console.warn(`Attempt ${attempt + 1} failed: ${String(e)} → rotating proxy…`);
-      await browser.close().catch(() => {});
+      console.log(`✅ JobBank: extracted ${unique.length} unique jobs → ${OUT_PATH}`);
+      await context.close();
+      return;
+    } catch (error) {
+      lastErr = error;
+      await page.screenshot({ path: path.join(SHOTS_DIR, `jobbank-failure-attempt-${attempt + 1}.png`), fullPage: true }).catch(() => {});
+      console.warn(`Attempt ${attempt + 1} failed: ${String(error)}. Retrying…`);
+      await context.close().catch(() => {});
     }
   }
 
