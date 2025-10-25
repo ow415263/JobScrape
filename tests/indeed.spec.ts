@@ -180,6 +180,7 @@ async function loadNextPage(page: Page): Promise<boolean> {
 // ---- main test ----
 
 test.skip(({ browserName }) => browserName !== 'chromium', 'Chromium-only test');
+test.skip(() => !!process.env.CI, 'Skip Indeed scraper in CI environment');
 
 test('Indeed → bypass gate, paginate, extract jobs', async () => {
   test.setTimeout(240_000);

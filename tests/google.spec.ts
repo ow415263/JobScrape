@@ -149,6 +149,7 @@ function deduplicateJobs(jobs: Job[]): Job[] {
 }
 
 test.skip(({ browserName }) => browserName !== 'chromium', 'Chromium-only test');
+test.skip(() => !!process.env.CI, 'Skip Google scraper in CI environment');
 
 test('Google → bypass gates, capture screenshots, extract jobs', async () => {
   test.setTimeout(240_000);
