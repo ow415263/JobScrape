@@ -1,160 +1,266 @@
-import { test, expect, Page, BrowserContext } from '@playwright/test';
-import { chromium } from 'playwright-extra';
-import StealthPlugin from 'puppeteer-extra-plugin-stealth';
+import { test } from '@playwright/test';
+import { chromium, Page } from 'patchright';
 import fs from 'fs';
 import path from 'path';
 
-chromium.use(StealthPlugin());
-
 const START_URL =
-  process.env.START_URL ||
+  process.env.INDEED_START_URL?.trim() ||
   'https://ca.indeed.com/jobs?q=ece&l=toronto%2C+on&radius=25';
 
 const SHOTS_DIR = path.resolve('screens');
 fs.mkdirSync(SHOTS_DIR, { recursive: true });
 
-type ProxyAuth = { server: string; username: string; password: string };
-const BASE_PROXIES: ProxyAuth[] = [
-  { server: 'http://brd.superproxy.io:33335', username: 'brd-customer-hl_89e14601-zone-residential_proxy1', password: 'iplu2iawmm2z' },
-  { server: 'http://brd.superproxy.io:33335', username: 'brd-customer-hl_89e14601-zone-residential_proxy2', password: 'wekc39rm8od1' },
-  { server: 'http://brd.superproxy.io:33335', username: 'brd-customer-hl_89e14601-zone-residential_proxy3', password: '5iymfyjztb7u' },
-];
+const OUT_PATH = path.resolve('data', 'indeed.json');
+const HTML_DUMP_PATH = path.resolve('data', 'indeed-dump.html');
+const MAX_PAGES = Number(process.env.INDEED_PAGES || 3);
 
-function stickyUser(u: string): string {
-  const sess = `session-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
-  let out = u.includes('-session-') ? u : `${u}-${sess}`;
-  if (!/-country-/.test(out)) out = `${out}-country-ca`; 
-  return out;
-}
-function pickProxy(i: number): ProxyAuth {
-  const b = BASE_PROXIES[i % BASE_PROXIES.length];
-  return { ...b, username: stickyUser(b.username) };
-}
+type Job = {
+  title: string;
+  employer: string;
+  location?: string;
+  date?: string;
+  salary?: string;
+  url: string;
+};
 
-async function isGate(page: Page): Promise<boolean> {
-  const gates = [
-    /Verify you are human/i,
-    /Checking your browser/i,
-    /Just a moment/i,
-    /Additional Verification Required/i,
-  ];
-  for (const g of gates) {
-    const el = page.getByText(g).first();
-    if ((await el.count()) > 0 && (await el.isVisible().catch(() => false))) return true;
-  }
-  const hasTurnstile = await page
-    .locator('iframe[title*="cf"], iframe[title*="Cloudflare"], iframe[src*="challenge"], iframe[title*="Turnstile"]')
-    .first()
-    .count();
-  const hasList = await page.locator('#mosaic-provider-jobcards').first().count();
-  return hasTurnstile > 0 && hasList === 0;
-}
-
-async function injectCookies(context: BrowserContext): Promise<void> {
-  const raw = process.env.CF_COOKIES?.trim();
-  if (!raw) return;
-  const cookies = raw
-    .split(';')
-    .map(s => s.trim())
-    .filter(Boolean)
-    .map(kv => {
-      const [name, ...rest] = kv.split('=');
-      return {
-        name,
-        value: rest.join('='),
-        domain: '.indeed.com',
-        path: '/',
-        httpOnly: true,
-        secure: true,
-      };
-    });
-  if (cookies.length) await context.addCookies(cookies as any);
-}
-
-async function acceptCookies(page: Page): Promise<void> {
+// ---- helpers ----
+async function acceptConsent(page: Page): Promise<void> {
   await page.keyboard.press('Escape').catch(() => {});
-  const btn = page.locator('#onetrust-accept-btn-handler, button:has-text("Accept All Cookies")').first();
-  if (await btn.isVisible().catch(() => false)) await btn.click().catch(() => {});
+  const modalDismiss = page.locator('button[aria-label="Close"], button[title="Close"], button:has-text("No thanks")').first();
+  if (await modalDismiss.isVisible().catch(() => false)) {
+    await modalDismiss.click().catch(() => {});
+  }
+  const accept = page
+    .locator(
+      [
+        '#onetrust-accept-btn-handler',
+        'button:has-text("Accept All Cookies")',
+        'button:has-text("Accept all cookies")',
+        'button:has-text("Accept Cookies")',
+      ].join(', ')
+    )
+    .first();
+  if (await accept.isVisible().catch(() => false)) {
+    await accept.click().catch(() => {});
+    await page.waitForTimeout(400);
+  }
+}
+
+async function looksLikeGate(page: Page): Promise<boolean> {
+  const phrases = [
+    /verify you are human/i,
+    /checking your browser/i,
+    /just a moment/i,
+    /additional verification required/i,
+    /robot check/i,
+  ];
+  for (const text of phrases) {
+    const node = page.getByText(text).first();
+    if ((await node.count()) > 0 && (await node.isVisible().catch(() => false))) return true;
+  }
+  const gateFrames = await page
+    .locator('iframe[title*="cf"], iframe[title*="Cloudflare"], iframe[src*="challenge"], iframe[title*="Turnstile"]')
+    .count();
+  const jobCards = await page.locator('#mosaic-provider-jobcards, a.tapItem').count();
+  return gateFrames > 0 && jobCards === 0;
 }
 
 async function humanize(page: Page): Promise<void> {
-  const jitter = () => 120 + Math.round(Math.random() * 420);
-  await page.waitForTimeout(jitter());
-  await page.mouse.move(
-    200 + Math.random() * 400,
-    200 + Math.random() * 300,
-    { steps: 10 + Math.floor(Math.random() * 10) }
-  );
-  await page.waitForTimeout(jitter());
+  const delay = () => 1800 + Math.round(Math.random() * 2200);
+  await page.waitForTimeout(delay());
+  await page.mouse.move(220 + Math.random() * 420, 220 + Math.random() * 260, { steps: 10 + Math.floor(Math.random() * 8) });
+  await page.waitForTimeout(400 + Math.round(Math.random() * 400));
+  await page.mouse.wheel(0, 320 + Math.round(Math.random() * 280));
+  await page.waitForTimeout(400 + Math.round(Math.random() * 400));
 }
 
-test('Indeed → pass Cloudflare then confirm cards (before/after screenshots)', async () => {
+async function waitForResults(page: Page, timeout = 20_000): Promise<void> {
+  const start = Date.now();
+  while (Date.now() - start < timeout) {
+    const ready = await page.locator('a.tapItem, a[data-jk], .jobsearch-ResultsList').first().isVisible().catch(() => false);
+    if (ready) return;
+    await page.waitForTimeout(400);
+  }
+  throw new Error('Indeed results not ready in allotted time');
+}
+
+async function extractJobs(page: Page): Promise<Job[]> {
+  return page.evaluate(() => {
+    const clean = (value?: string | null) => (value ? value.replace(/\s+/g, ' ').trim() : undefined);
+    const jobs: Job[] = [];
+    const cards = Array.from(
+      document.querySelectorAll<HTMLElement>('div.job_seen_beacon, li.job_seen_beacon, div.cardOutline, a.tapItem')
+    );
+
+    for (const card of cards) {
+      const anchor =
+        (card.matches('a') ? (card as HTMLAnchorElement) : card.querySelector<HTMLAnchorElement>('a.tapItem, a[id^="job_"]')) ||
+        null;
+      const titleEl = card.querySelector('[data-testid="jobTitle"], h2.jobTitle, h2 a');
+      const employerEl = card.querySelector('[data-testid="company-name"], span.companyName');
+      const locationEl = card.querySelector('[data-testid="text-location"], div.companyLocation');
+      const dateEl = card.querySelector('[data-testid="myJobsStateDate"], span.date, .jobsearch-JobMetadataFooter');
+      const salaryEl = card.querySelector('[data-testid="attribute_snippet_testId"], .salary-snippet, .attribute_snippet');
+
+      if (!anchor || !titleEl) continue;
+
+      const href = anchor.getAttribute('href') || anchor.href || '';
+      let url = '';
+      try {
+        const abs = new URL(href, window.location.origin);
+        abs.hash = '';
+        url = abs.toString();
+      } catch {
+        url = href;
+      }
+
+      const job: Job = {
+        title: clean(titleEl.textContent) || '',
+        employer: clean(employerEl?.textContent) || '',
+        location: clean(locationEl?.textContent),
+        date: clean(dateEl?.textContent),
+        salary: clean(salaryEl?.textContent),
+        url,
+      };
+
+      if (job.title && job.url) jobs.push(job);
+    }
+
+    return jobs;
+  });
+}
+
+function canonicalizeUrl(input: string): string {
+  try {
+    const url = new URL(input);
+    url.hash = '';
+    url.searchParams.delete('from');
+    url.searchParams.delete('vjk');
+    url.searchParams.delete('advn');
+    url.searchParams.delete('adid');
+    return url.toString();
+  } catch {
+    return input.split('#')[0].split('?')[0];
+  }
+}
+
+function deduplicateJobs(jobs: Job[]): Job[] {
+  const seen = new Set<string>();
+  return jobs.filter(job => {
+    const canonical = canonicalizeUrl(job.url);
+    if (seen.has(canonical)) return false;
+    seen.add(canonical);
+    job.url = canonical;
+    return true;
+  });
+}
+
+async function goToStart(page: Page): Promise<void> {
+  await page.goto('https://ca.indeed.com/', { waitUntil: 'domcontentloaded', timeout: 60_000 }).catch(() => {});
+  await humanize(page);
+  await page.waitForTimeout(600 + Math.round(Math.random() * 600));
+  await page.goto(START_URL, { waitUntil: 'domcontentloaded', timeout: 60_000 });
+}
+
+async function loadNextPage(page: Page): Promise<boolean> {
+  const next = page.locator('a[aria-label="Next"], button[aria-label="Next"]').first();
+  if (!(await next.isVisible().catch(() => false))) return false;
+
+  await next.scrollIntoViewIfNeeded().catch(() => {});
+  await page.waitForTimeout(400 + Math.round(Math.random() * 400));
+  await Promise.all([
+    page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => {}),
+    next.click({ timeout: 8_000 }).catch(() => {}),
+  ]);
+
+  await page.waitForTimeout(600 + Math.round(Math.random() * 600));
+  return true;
+}
+
+// ---- main test ----
+
+test.skip(({ browserName }) => browserName !== 'chromium', 'Chromium-only test');
+
+test('Indeed → bypass gate, paginate, extract jobs', async () => {
   test.setTimeout(240_000);
 
   let lastErr: unknown;
-  const MAX_ATTEMPTS = Math.max(3, BASE_PROXIES.length * 3);
+  const MAX_ATTEMPTS = 3;
 
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
-    const proxy = pickProxy(attempt);
-
-    const browser = await chromium.launch({
-      headless: true,
-      proxy: { server: proxy.server, username: proxy.username, password: proxy.password },
+    const context = await chromium.launchPersistentContext('/tmp/patchright_indeed', {
+      channel: 'chrome',
+      headless: false,
+      viewport: null,
+      ignoreHTTPSErrors: true,
+      args: ['--headless=new'],
     });
 
-    const context = await browser.newContext({
-      ignoreHTTPSErrors: true, // proxy MITM certs
-      userAgent:
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-      locale: 'en-CA',
-      timezoneId: 'America/Toronto',
-      viewport: { width: 1290, height: 900 },
-      extraHTTPHeaders: { 'accept-language': 'en-CA,en;q=0.9' },
-    });
-
-    await injectCookies(context);
-    const page = await context.newPage();
+    const page = context.pages()[0] || (await context.newPage());
 
     try {
-      // Home first (lighter), then query
-      await page.goto('https://ca.indeed.com/', { waitUntil: 'domcontentloaded', timeout: 60_000 });
-      await humanize(page);
-      await page.goto(START_URL, { waitUntil: 'domcontentloaded', timeout: 60_000 });
-      await acceptCookies(page);
+      await goToStart(page);
+      await acceptConsent(page);
 
-      // BEFORE screenshot (pre-solve state)
-      await page.screenshot({ path: path.join(SHOTS_DIR, 'indeed-before.png'), fullPage: true });
-
-      // CF auto-verify loop
-      for (let i = 0; i < 8; i++) {
-        if (!(await isGate(page))) break;
-        await page.mouse.move(200 + i * 30, 200 + i * 20);
-        await page.waitForTimeout(900 + Math.floor(Math.random() * 1100));
+      for (let gateRetry = 0; gateRetry < 6; gateRetry++) {
+        if (!(await looksLikeGate(page))) break;
+        await humanize(page);
+        await page.waitForTimeout(1_000 + Math.round(Math.random() * 800));
+        await page.reload({ waitUntil: 'domcontentloaded' }).catch(() => {});
+        await acceptConsent(page);
       }
 
-      if (await isGate(page)) {
-        await page.reload({ waitUntil: 'domcontentloaded' });
-        await page.waitForTimeout(1200);
+      if (await looksLikeGate(page)) {
+        await page.screenshot({
+          path: path.join(SHOTS_DIR, `indeed-gate-attempt-${attempt + 1}.png`),
+          fullPage: true,
+        }).catch(() => {});
+        throw new Error('Cloudflare gate persisted after retries');
       }
 
-      if (await isGate(page)) {
-        await page.screenshot({ path: path.join(SHOTS_DIR, `indeed-gate-attempt-${attempt + 1}.png`), fullPage: true }).catch(() => {});
-        throw new Error('Cloudflare gate persisted');
+      const allJobs: Job[] = [];
+
+      for (let pageIndex = 0; pageIndex < MAX_PAGES; pageIndex++) {
+        await waitForResults(page);
+        await page.screenshot({
+          path: path.join(SHOTS_DIR, `indeed-page-${pageIndex + 1}.png`),
+          fullPage: true,
+        }).catch(() => {});
+
+        if (pageIndex === 0) {
+          await fs.promises.writeFile(HTML_DUMP_PATH, await page.content(), 'utf8').catch(() => {});
+        }
+
+        const pageJobs = await extractJobs(page);
+        allJobs.push(...pageJobs);
+
+        if (pageIndex === MAX_PAGES - 1) break;
+        const advanced = await loadNextPage(page);
+        if (!advanced) break;
       }
 
-      // Confirm results and AFTER screenshot
-      await expect(page.locator('#mosaic-provider-jobcards')).toBeVisible({ timeout: 15_000 });
-      await page.screenshot({ path: path.join(SHOTS_DIR, 'indeed-after.png'), fullPage: true });
+      const unique = deduplicateJobs(allJobs);
+      await fs.promises.mkdir(path.dirname(OUT_PATH), { recursive: true });
+      await fs.promises.writeFile(OUT_PATH, JSON.stringify(unique, null, 2), 'utf8');
 
-      console.log(`✅ Ready using proxy username: ${proxy.username}`);
-      await browser.close();
-      return; // success
-    } catch (e) {
-      lastErr = e;
-      console.warn(`Attempt ${attempt + 1} failed: ${String(e)} → rotating proxy…`);
-      await browser.close().catch(() => {});
+      await page.screenshot({ path: path.join(SHOTS_DIR, 'indeed-after.png'), fullPage: true }).catch(() => {});
+      console.log(`✅ Indeed: extracted ${unique.length} unique jobs → ${OUT_PATH}`);
+
+      await context.close();
+      return;
+    } catch (error) {
+      lastErr = error;
+      const dumpPath = path.join(path.dirname(HTML_DUMP_PATH), `indeed-error-attempt-${attempt + 1}.html`);
+      await fs.promises
+        .writeFile(dumpPath, await page.content().catch(() => '<!-- failed to capture HTML -->'), 'utf8')
+        .catch(() => {});
+      await page
+        .screenshot({ path: path.join(SHOTS_DIR, `indeed-failure-attempt-${attempt + 1}.png`), fullPage: true })
+        .catch(() => {});
+      console.warn(`Attempt ${attempt + 1} failed: ${String(error)}. Retrying…`);
+      await context.close().catch(() => {});
     }
   }
 
-  throw lastErr ?? new Error('Still on Cloudflare after attempts.');
+  throw lastErr ?? new Error('Indeed scrape failed after retries');
 });
